@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Glycemic Index & Load Checker</title>
+
+<style>
+body{
+    font-family: Arial, sans-serif;
+    background:#f4f7fa;
+    margin:0;
+    padding:20px;
+}
+
+.container{
+    max-width:900px;
+    margin:auto;
+    background:white;
+    padding:25px;
+    border-radius:12px;
+    box-shadow:0 0 10px rgba(0,0,0,0.15);
+}
+
+h1{
+    text-align:center;
+    color:#2c3e50;
+}
+
+label{
+    font-weight:bold;
+    display:block;
+    margin-top:15px;
+}
+
+select,input{
+    width:100%;
+    padding:10px;
+    margin-top:5px;
+    border:1px solid #ccc;
+    border-radius:6px;
+}
+
+button{
+    margin-top:20px;
+    width:100%;
+    padding:12px;
+    border:none;
+    background:#27ae60;
+    color:white;
+    font-size:16px;
+    border-radius:6px;
+    cursor:pointer;
+}
+
+button:hover{
+    background:#219150;
+}
+
+.result{
+    margin-top:25px;
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+}
+
+table th,
+table td{
+    border:1px solid #ddd;
+    padding:10px;
+    text-align:left;
+}
+
+table th{
+    background:#3498db;
+    color:white;
+}
+
+.low{
+    color:green;
+    font-weight:bold;
+}
+
+.medium{
+    color:orange;
+    font-weight:bold;
+}
+
+.high{
+    color:red;
+    font-weight:bold;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>🍽 Glycemic Index & Load Checker</h1>
+
+<label>Select Category</label>
+<select id="category">
+    <option value="">-- Select Category --</option>
+    <option value="Fruits">🍎 Fruits</option>
+    <option value="Vegetables">🥦 Vegetables</option>
+    <option value="Nuts">🥜 Nuts</option>
+</select>
+
+<label>Select Food Item</label>
+<select id="food">
+    <option value="">-- Select Food --</option>
+</select>
+
+<label>Serving Size (grams)</label>
+<input
+    type="number"
+    id="serving"
+    placeholder="Enter serving size"
+>
+
+<button onclick="calculateGI()">
+    Calculate GI & GL
+</button>
+
+<div class="result" id="result"></div>
+
+</div>
+
+<script>
+
+// Food Database
+const foodData = {
+
+    Fruits: {
+        Mango:{
+            gi:51,
+            carbs:15.0,
+            serving:100
+        },
+        Watermelon:{
+            gi:76,
+            carbs:7.6,
+            serving:100
+        },
+        Jackfruit:{
+            gi:50,
+            carbs:23.5,
+            serving:100
+        },
+        Banana:{
+            gi:52,
+            carbs:22.8,
+            serving:100
+        }
+    },
+
+    Vegetables:{
+        Carrot:{
+            gi:39,
+            carbs:9.6,
+            serving:100
+        },
+        Beetroot:{
+            gi:64,
+            carbs:9.6,
+            serving:100
+        },
+        Potato:{
+            gi:78,
+            carbs:17.0,
+            serving:100
+        }
+    },
+
+    Nuts:{
+        Peanuts:{
+            gi:14,
+            carbs:7.0,
+            serving:30
+        },
+        Almonds:{
+            gi:0,
+            carbs:9.1,
+            serving:30
+        },
+        Chickpeas:{
+            gi:28,
+            carbs:27.4,
+            serving:100
+        }
+    }
+};
+
+// Category Change
+document
+.getElementById("category")
+.addEventListener("change", function(){
+
+    const category = this.value;
+    const foodDropdown =
+        document.getElementById("food");
+
+    foodDropdown.innerHTML =
+        '<option value="">-- Select Food --</option>';
+
+    if(category){
+
+        Object.keys(foodData[category])
+        .forEach(food=>{
+
+            let option =
+                document.createElement("option");
+
+            option.value = food;
+            option.textContent = food;
+
+            foodDropdown.appendChild(option);
+        });
+    }
+});
+
+// GI Classification
+function classifyGI(gi){
+
+    if(gi < 55){
+        return {
+            text:"✅ Low GI",
+            className:"low"
+        };
+    }
+
+    if(gi <= 69){
+        return {
+            text:"⚠️ Medium GI",
+            className:"medium"
+        };
+    }
+
+    return {
+        text:"❌ High GI",
+        className:"high"
+    };
+}
+
+// GL Classification
+function classifyGL(gl){
+
+    if(gl <= 10){
+        return {
+            text:"✅ Low Risk",
+            className:"low"
+        };
+    }
+
+    if(gl <= 19){
+        return {
+            text:"⚠️ Medium Risk",
+            className:"medium"
+        };
+    }
+
+    return {
+        text:"❌ High Risk",
+        className:"high"
+    };
+}
+
+// Daily Recommendation
+function getDailyLimit(gi){
+
+    if(gi < 55){
+        return "Up to 200g per day";
+    }
+
+    if(gi <= 69){
+        return "Up to 100g per day";
+    }
+
+    return "Up to 50g per day";
+}
+
+// Main Calculation
+function calculateGI(){
+
+    const category =
+        document.getElementById("category").value;
+
+    const food =
+        document.getElementById("food").value;
+
+    if(!category || !food){
+        alert("Please select category and food.");
+        return;
+    }
+
+    const item =
+        foodData[category][food];
+
+    let serving =
+        Number(
+            document.getElementById("serving").value
+        );
+
+    if(!serving){
+        serving = item.serving;
+    }
+
+    // Carbs in selected serving
+    const carbsServing =
+        (item.carbs * serving) / 100;
+
+    // GL Formula
+    const gl =
+        (item.gi * carbsServing) / 100;
+
+    const giClass =
+        classifyGI(item.gi);
+
+    const glClass =
+        classifyGL(gl);
+
+    const recommendation =
+        getDailyLimit(item.gi);
+
+    document.getElementById("result")
+    .innerHTML = `
+    <table>
+        <tr>
+            <th>Field</th>
+            <th>Value</th>
+        </tr>
+
+        <tr>
+            <td>Food Name</td>
+            <td>${food}</td>
+        </tr>
+
+        <tr>
+            <td>Category</td>
+            <td>${category}</td>
+        </tr>
+
+        <tr>
+            <td>Glycemic Index (GI)</td>
+            <td>${item.gi}</td>
+        </tr>
+
+        <tr>
+            <td>Carbohydrates (per 100g)</td>
+            <td>${item.carbs} g</td>
+        </tr>
+
+        <tr>
+            <td>Serving Size</td>
+            <td>${serving} g</td>
+        </tr>
+
+        <tr>
+            <td>Glycemic Load (GL)</td>
+            <td>${gl.toFixed(2)}</td>
+        </tr>
+
+        <tr>
+            <td>GI Classification</td>
+            <td class="${giClass.className}">
+                ${giClass.text}
+            </td>
+        </tr>
+
+        <tr>
+            <td>GL Risk Level</td>
+            <td class="${glClass.className}">
+                ${glClass.text}
+            </td>
+        </tr>
+
+        <tr>
+            <td>Recommended Daily Quantity</td>
+            <td>${recommendation}</td>
+        </tr>
+
+    </table>
+    `;
+}
+
+</script>
+
+</body>
+</html>
