@@ -1,0 +1,27 @@
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: glycemic-app                         # Name of the Argo CD application
+  namespace: argocd                          # Argo CD usually runs in argocd namespace
+
+spec:
+  project: default                           # Argo CD project; default is fine for labs/POC
+
+  source:
+    repoURL: https://github.com/sasikr90/glycemic-gitops.git   # GitOps repository URL
+    targetRevision: main                     # Branch Argo CD should watch
+    path: app                                # Folder containing deployment/service manifests
+
+  destination:
+    server: https://kubernetes.default.svc   # Means "deploy to the same cluster where Argo CD runs"
+    namespace: glycemic                      # Namespace to deploy the application into
+
+  syncPolicy:
+    automated:
+      prune: true                            # Remove old resources not present in Git anymore
+      selfHeal: true                         # If cluster drifts from Git, Argo CD will fix it
+
+    syncOptions:
+      - CreateNamespace=true                 # Argo CD creates the namespace if it doesn't exist
+
