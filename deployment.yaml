@@ -1,0 +1,56 @@
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glycemic-app                         # Deployment name in Kubernetes
+  namespace: glycemic                        # Namespace where app will be deployed
+  labels:
+    app: glycemic-app                        # Label for the Deployment object itself
+
+spec:
+  replicas: 2                               # Run 2 Pods for high availability
+
+  selector:
+    matchLabels:
+      app: glycemic-app                      # Deployment manages Pods with this label
+
+  template:
+    metadata:
+      labels:
+        app: glycemic-app                    # Pods created by this Deployment get this label
+
+    spec:
+      containers:
+        - name: glycemic-app                 # Container name inside the Pod
+          image: sasikr90/glycemic-app:latest
+          # IMPORTANT:
+          # GitHub Actions will replace this tag with the commit SHA tag.
+          # Example: sasikr90/glycemic-app:3c2d9a8f...
+
+          imagePullPolicy: Always            # Always pull image from Docker Hub when Pod starts
+
+          ports:
+            - containerPort: 80              # App listens on port 80 inside the container
+
+          resources:
+            requests:
+              cpu: "250m"                    # Minimum CPU guaranteed for the container
+              memory: "256Mi"                # Minimum memory guaranteed for the container
+            limits:
+              cpu: "500m"                    # Max CPU container can use
+              memory: "512Mi"                # Max memory container can use
+
+          readinessProbe:
+            httpGet:
+              path: /                        # Probe checks if app is ready to serve traffic
+              port: 80
+            initialDelaySeconds: 10          # Wait 10 sec before first readiness check
+            periodSeconds: 10                # Check every 10 sec
+
+          livenessProbe:
+            httpGet:
+              path: /                        # Probe checks if app is alive; if not, restart container
+              port: 80
+            initialDelaySeconds: 20          # Give app some startup time before liveness checks
+            periodSeconds: 15                # Check every 15 sec
+```
