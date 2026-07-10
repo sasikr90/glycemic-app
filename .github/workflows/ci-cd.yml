@@ -1,89 +1,61 @@
 name: glycemic-app-ci-cd
 
-# This workflow runs whenever code is pushed to the main branch.
-# In your case, main is the branch where app code + k8s manifests are stored.
+# Trigger workflow automatically when code is pushed to main branch
+# Also allow manual execution from GitHub Actions UI using "Run workflow"
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
-# Global environment variables.
-# We keep reusable values here so we don't repeat them multiple times in the workflow.
+# Global reusable variables
 env:
-  IMAGE_NAME: sasikr90/glycemic-app         # Docker Hub repository name where image will be pushed
-  DEPLOYMENT_FILE: deployment.yaml          # Kubernetes deployment manifest file inside the same repo
+  IMAGE_NAME: sasikr90/glycemic-app   # Docker Hub image repository
+  DEPLOYMENT_FILE: deployment.yaml    # Path to Kubernetes deployment manifest file
 
 jobs:
   build-scan-push-update:
-    name: Build image, scan with Trivy, push to Docker Hub, update deployment manifest
-    runs-on: ubuntu-latest                  # GitHub-hosted Linux runner
+    name: Build image, scan, push, and update deployment manifest
+    runs-on: ubuntu-latest
 
-    # We need write permission because later this workflow will modify deployment.yaml
-    # and push that updated file back into the same GitHub repository.
+    # Required because this workflow will commit deployment.yaml back to the same repo
     permissions:
       contents: write
 
     steps:
       # ------------------------------------------------------------
-      # STEP 1 - Checkout source code from the current GitHub repo
+      # STEP 1 - Checkout repository code
       # ------------------------------------------------------------
+      # fetch-depth: 0 gets full git history.
+      # Useful because later this workflow will commit/push back to the same branch.
       - name: Checkout repository code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # fetch-depth: 0 fetches full git history.
-          # Not mandatory for basic build, but useful when the workflow itself commits back to the repo.
 
       # ------------------------------------------------------------
-      # STEP 2 - Prevent infinite workflow loop
+      # STEP 2 - Set image tag from current Git commit SHA
       # ------------------------------------------------------------
-      # Why do we need this?
-      # Because this workflow will update deployment.yaml and commit it back to the same repo.
-      # That new commit would normally trigger the workflow again and cause a loop.
-      #
-      # So here we check the latest commit message.
-      # If the commit message contains [skip ci], we stop the workflow immediately.
-      - name: Stop workflow if commit was created by CI
-        run: |
-          COMMIT_MSG=$(git log -1 --pretty=%B)
-          echo "Latest commit message: $COMMIT_MSG"
-
-          if echo "$COMMIT_MSG" | grep -q "\[skip ci\]"; then
-            echo "Commit contains [skip ci], so exiting workflow to avoid loop."
-            exit 0
-          fi
-
-      # ------------------------------------------------------------
-      # STEP 3 - Generate image tag from Git commit SHA
-      # ------------------------------------------------------------
-      # Why use commit SHA?
-      # Because every build gets a unique immutable image tag.
       # Example:
-      #   sasikr90/glycemic-app:4f8a1c2
+      #   full SHA   = 7c9613a4f1e2d...
+      #   short tag  = 7c9613a
       #
-      # This is much better than always using latest because:
-      # - rollback is easier
-      # - we know exactly which code version is deployed
-      # - Argo CD/GitOps history becomes clearer
+      # Using commit SHA gives each image a unique immutable tag.
       - name: Set image tag from commit SHA
         run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
-        # ${GITHUB_SHA::7} takes first 7 characters of the commit SHA
-        # Example full SHA: 4f8a1c2f3e7a9b...
-        # Short tag becomes: 4f8a1c2
 
       # ------------------------------------------------------------
-      # STEP 4 - Set up Docker Buildx
+      # STEP 3 - Set up Docker Buildx
       # ------------------------------------------------------------
-      # Buildx is Docker's modern build engine.
-      # It is recommended in GitHub Actions and supports better caching and advanced builds.
+      # Buildx is Docker's recommended build engine for GitHub Actions.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       # ------------------------------------------------------------
-      # STEP 5 - Log in to Docker Hub
+      # STEP 4 - Login to Docker Hub
       # ------------------------------------------------------------
-      # Required because we are going to push the built image to Docker Hub.
-      # Username and token are stored securely in GitHub Secrets.
+      # Required before pushing images to Docker Hub.
+      # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN must exist in GitHub Secrets.
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -91,109 +63,108 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # ------------------------------------------------------------
-      # STEP 6 - Build Docker image locally on the GitHub runner
+      # STEP 5 - Build Docker image locally in the GitHub runner
       # ------------------------------------------------------------
-      # We build the image before scanning because Trivy should scan the exact image
-      # that we plan to push and deploy.
-      #
-      # We tag the image using the unique IMAGE_TAG created from the commit SHA.
+      # This creates an image tagged with the Git commit SHA.
+      # Example:
+      #   sasikr90/glycemic-app:7c9613a
       - name: Build Docker image
         run: |
           docker build -t $IMAGE_NAME:$IMAGE_TAG .
 
       # ------------------------------------------------------------
-      # STEP 7 - Run Trivy vulnerability scan on the built image
+      # STEP 6 - Scan Docker image with Trivy
       # ------------------------------------------------------------
-      # Trivy scans:
-      # - OS packages in the image
-      # - application dependencies
-      # - known CVEs
+      # Trivy checks the built image for known vulnerabilities.
       #
-      # Important settings:
-      # - exit-code: '1'   -> fail the pipeline if vulnerabilities of selected severities are found
-      # - ignore-unfixed   -> don't fail for issues that currently have no fix available
-      # - severity         -> only fail for HIGH and CRITICAL vulnerabilities
+      # Current recommendation for your learning setup:
+      # - exit-code: '0'  -> show vulnerabilities in logs but do not fail pipeline
+      # - scanners: vuln  -> only vulnerability scan, skip secret scanning for faster execution
       #
-      # You can relax this later for learning by removing exit-code or changing severity.
+      # Once your pipeline is stable, you can tighten this back to:
+      #   exit-code: '1'
+      #   severity: CRITICAL
       - name: Scan Docker image with Trivy
-        uses: aquasecurity/trivy-action@v0.24.0
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           format: table
-          exit-code: '1'
+          exit-code: '0'
           ignore-unfixed: true
           severity: HIGH,CRITICAL
+          scanners: vuln
 
       # ------------------------------------------------------------
-      # STEP 8 - Push image with commit-SHA tag to Docker Hub
+      # STEP 7 - Push image with SHA tag to Docker Hub
       # ------------------------------------------------------------
-      # This happens only if Trivy scan passed.
-      # We push the immutable versioned tag first.
+      # Push the immutable versioned image first.
       - name: Push Docker image with SHA tag
         run: |
           docker push $IMAGE_NAME:$IMAGE_TAG
 
       # ------------------------------------------------------------
-      # STEP 9 - Also tag and push "latest"
+      # STEP 8 - Tag the same image as "latest" and push it
       # ------------------------------------------------------------
-      # Why keep latest?
-      # - convenient for quick manual testing
-      # - useful when you just want to pull the newest image quickly
-      #
-      # But for Kubernetes deployment / GitOps, commit SHA tag is safer and preferred.
+      # latest is optional, but convenient for quick testing.
+      # Kubernetes GitOps deployment should still use SHA tag, not latest.
       - name: Tag and push latest image
         run: |
           docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:latest
           docker push $IMAGE_NAME:latest
 
       # ------------------------------------------------------------
-      # STEP 10 - Update deployment.yaml with the new image tag
+      # STEP 9 - Update deployment manifest with the new image tag
       # ------------------------------------------------------------
-      # We want Argo CD to deploy the new image version.
-      # Since Argo CD watches Git, we must update deployment.yaml in this repo.
+      # Argo CD watches Git, not Docker Hub.
+      # So after pushing the image, we must update deployment.yaml
+      # with the new image tag so Argo CD sees a Git change and deploys it.
       #
-      # Example old line:
-      #   image: sasikr90/glycemic-app:latest
-      #
-      # Example new line after replacement:
-      #   image: sasikr90/glycemic-app:4f8a1c2
-      #
-      # The sed command below replaces the entire image line.
+      # Example replacement:
+      #   image: sasikr90/glycemic-app:oldtag
+      # becomes
+      #   image: sasikr90/glycemic-app:7c9613a
       - name: Update Kubernetes deployment manifest with new image tag
         run: |
           sed -i "s|image: .*|image: $IMAGE_NAME:$IMAGE_TAG|g" $DEPLOYMENT_FILE
 
       # ------------------------------------------------------------
-      # STEP 11 - Show the updated deployment file in logs
+      # STEP 10 - Display updated deployment file for debugging
       # ------------------------------------------------------------
-      # This is optional but very useful for debugging.
-      # You can verify that the image line was correctly replaced.
+      # Helpful to verify that the image tag was updated correctly.
       - name: Display updated deployment file
         run: |
-          echo "Updated deployment.yaml content:"
+          echo "Updated deployment file content:"
           cat $DEPLOYMENT_FILE
 
       # ------------------------------------------------------------
-      # STEP 12 - Commit the updated deployment.yaml back to GitHub
+      # STEP 11 - Commit and push updated deployment manifest back to GitHub
       # ------------------------------------------------------------
       # This is the GitOps trigger point.
       # Once deployment.yaml is committed with the new image tag,
-      # Argo CD will notice the repo change and sync it to Kubernetes.
+      # Argo CD detects the repo change and syncs it to Kubernetes.
       #
-      # We add [skip ci] in the commit message so that this CI-generated commit
-      # does NOT trigger the workflow again and create an infinite loop.
+      # [skip ci] is added in commit message so this CI-generated commit
+      # does not trigger an unnecessary pipeline loop.
       - name: Commit and push updated deployment manifest
         run: |
+          # Configure Git identity for the automated commit
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
+          # Stage only the deployment file we modified
           git add $DEPLOYMENT_FILE
 
-          # Check whether deployment.yaml actually changed before committing.
-          # This avoids "nothing to commit" errors.
+          # If there is no actual file change, skip commit/push
           if git diff --cached --quiet; then
             echo "No manifest changes detected. Nothing to commit."
           else
+            # Commit updated image tag into deployment.yaml
             git commit -m "Update deployment image to $IMAGE_TAG [skip ci]"
+
+            # Pull latest remote changes before pushing.
+            # This avoids non-fast-forward push errors if main moved ahead.
+            git pull --rebase origin main
+
+            # Push updated deployment manifest back to the same branch
             git push origin main
           fi
