@@ -1,170 +1,329 @@
 name: glycemic-app-ci-cd
 
-# Trigger workflow automatically when code is pushed to main branch
-# Also allow manual execution from GitHub Actions UI using "Run workflow"
+# This workflow runs whenever code is pushed to the main branch.
+# In your current project, the same repo contains:
+# 1. application source code
+# 2. Dockerfile
+# 3. Kubernetes deployment.yaml/service.yaml
+# So any change pushed to main can trigger the CI/CD flow.
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
 
-# Global reusable variables
+# Global environment variables used across the workflow.
 env:
-  IMAGE_NAME: sasikr90/glycemic-app   # Docker Hub image repository
-  DEPLOYMENT_FILE: deployment.yaml    # Path to Kubernetes deployment manifest file
+  IMAGE_NAME: sasikr90/glycemic-app      # Docker Hub repo name
+  DEPLOYMENT_FILE: deployment.yaml       # Kubernetes deployment manifest file in the repo
+  DOCKERHUB_REPO: glycemic-app           # Docker Hub repository name only (without username)
+  TAGS_TO_KEEP: "3"                      # Keep latest 3 SHA-based tags + latest + current image tag
 
 jobs:
   build-scan-push-update:
-    name: Build image, scan, push, and update deployment manifest
+    name: Build, scan, push, update manifest, cleanup old Docker Hub tags
     runs-on: ubuntu-latest
 
-    # Required because this workflow will commit deployment.yaml back to the same repo
+    # Required because this workflow updates deployment.yaml
+    # and pushes the changed file back into the same GitHub repo.
     permissions:
       contents: write
 
     steps:
-      # ------------------------------------------------------------
-      # STEP 1 - Checkout repository code
-      # ------------------------------------------------------------
-      # fetch-depth: 0 gets full git history.
-      # Useful because later this workflow will commit/push back to the same branch.
+      # ============================================================
+      # STEP 1 - Checkout the repository code
+      # ============================================================
       - name: Checkout repository code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # fetch-depth: 0 downloads full git history.
+          # This helps when the workflow itself commits and pushes changes back.
 
-      # ------------------------------------------------------------
-      # STEP 2 - Set image tag from current Git commit SHA
-      # ------------------------------------------------------------
-      # Example:
-      #   full SHA   = 7c9613a4f1e2d...
-      #   short tag  = 7c9613a
+      # ============================================================
+      # STEP 2 - Prevent infinite CI loop
+      # ============================================================
+      # Why?
+      # This workflow later updates deployment.yaml and pushes that change back.
+      # That new commit would again trigger the same workflow.
       #
-      # Using commit SHA gives each image a unique immutable tag.
+      # To avoid endless recursion, our CI-generated commit message contains [skip ci].
+      # Here we check the latest commit message.
+      # If it contains [skip ci], we exit immediately.
+      - name: Stop workflow if commit was created by CI
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Latest commit message: $COMMIT_MSG"
+
+          if echo "$COMMIT_MSG" | grep -q "\[skip ci\]"; then
+            echo "Commit contains [skip ci], exiting workflow to avoid infinite loop."
+            exit 0
+          fi
+
+      # ============================================================
+      # STEP 3 - Generate a unique image tag from Git commit SHA
+      # ============================================================
+      # Example:
+      # Full SHA: 7c9613a0abf1c7e...
+      # Short tag: 7c9613a
+      #
+      # Why use commit SHA as image tag?
+      # - every build gets a unique immutable tag
+      # - rollback is easy
+      # - we know exactly which code version is deployed
       - name: Set image tag from commit SHA
         run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
 
-      # ------------------------------------------------------------
-      # STEP 3 - Set up Docker Buildx
-      # ------------------------------------------------------------
-      # Buildx is Docker's recommended build engine for GitHub Actions.
+      # ============================================================
+      # STEP 4 - Set up Docker Buildx
+      # ============================================================
+      # Buildx is Docker's modern build engine and works well in GitHub Actions.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ------------------------------------------------------------
-      # STEP 4 - Login to Docker Hub
-      # ------------------------------------------------------------
-      # Required before pushing images to Docker Hub.
-      # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN must exist in GitHub Secrets.
+      # ============================================================
+      # STEP 5 - Login to Docker Hub
+      # ============================================================
+      # Needed because we will push the image to Docker Hub.
+      #
+      # Required GitHub Secrets:
+      # - DOCKERHUB_USERNAME
+      # - DOCKERHUB_TOKEN
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ------------------------------------------------------------
-      # STEP 5 - Build Docker image locally in the GitHub runner
-      # ------------------------------------------------------------
-      # This creates an image tagged with the Git commit SHA.
-      # Example:
-      #   sasikr90/glycemic-app:7c9613a
+      # ============================================================
+      # STEP 6 - Build Docker image locally on the GitHub runner
+      # ============================================================
+      # We build the image first, then Trivy will scan THIS exact image.
       - name: Build Docker image
         run: |
           docker build -t $IMAGE_NAME:$IMAGE_TAG .
 
-      # ------------------------------------------------------------
-      # STEP 6 - Scan Docker image with Trivy
-      # ------------------------------------------------------------
-      # Trivy checks the built image for known vulnerabilities.
+      # ============================================================
+      # STEP 7 - Scan Docker image with Trivy
+      # ============================================================
+      # Trivy checks:
+      # - OS package vulnerabilities
+      # - library/package vulnerabilities
       #
-      # Current recommendation for your learning setup:
-      # - exit-code: '0'  -> show vulnerabilities in logs but do not fail pipeline
-      # - scanners: vuln  -> only vulnerability scan, skip secret scanning for faster execution
+      # exit-code: '1' means:
+      # If HIGH or CRITICAL vulnerabilities are found, the job fails here.
       #
-      # Once your pipeline is stable, you can tighten this back to:
-      #   exit-code: '1'
-      #   severity: CRITICAL
+      # ignore-unfixed: true means:
+      # If a vulnerability has no fix available yet, don't fail only for that reason.
+      #
+      # IMPORTANT:
+      # We run Trivy BEFORE pushing to Docker Hub.
+      # So if the image is unsafe, it never gets pushed.
       - name: Scan Docker image with Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           format: table
-          exit-code: '0'
+          exit-code: '1'
           ignore-unfixed: true
           severity: HIGH,CRITICAL
-          scanners: vuln
 
-      # ------------------------------------------------------------
-      # STEP 7 - Push image with SHA tag to Docker Hub
-      # ------------------------------------------------------------
-      # Push the immutable versioned image first.
+      # ============================================================
+      # STEP 8 - Push image with immutable SHA tag to Docker Hub
+      # ============================================================
+      # This step runs only if the Trivy scan passed.
       - name: Push Docker image with SHA tag
         run: |
           docker push $IMAGE_NAME:$IMAGE_TAG
 
-      # ------------------------------------------------------------
-      # STEP 8 - Tag the same image as "latest" and push it
-      # ------------------------------------------------------------
-      # latest is optional, but convenient for quick testing.
-      # Kubernetes GitOps deployment should still use SHA tag, not latest.
+      # ============================================================
+      # STEP 9 - Also tag and push "latest"
+      # ============================================================
+      # "latest" is useful for quick testing.
+      # But Kubernetes/Argo CD should ideally use the SHA tag for reliable deployments.
       - name: Tag and push latest image
         run: |
           docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:latest
           docker push $IMAGE_NAME:latest
 
-      # ------------------------------------------------------------
-      # STEP 9 - Update deployment manifest with the new image tag
-      # ------------------------------------------------------------
-      # Argo CD watches Git, not Docker Hub.
-      # So after pushing the image, we must update deployment.yaml
-      # with the new image tag so Argo CD sees a Git change and deploys it.
+      # ============================================================
+      # STEP 10 - Update deployment.yaml with the new image tag
+      # ============================================================
+      # Example old line:
+      # image: sasikr90/glycemic-app:oldtag
       #
-      # Example replacement:
-      #   image: sasikr90/glycemic-app:oldtag
-      # becomes
-      #   image: sasikr90/glycemic-app:7c9613a
+      # Example new line:
+      # image: sasikr90/glycemic-app:7c9613a
+      #
+      # Argo CD watches Git, not Docker Hub.
+      # So we must update deployment.yaml in Git for Argo CD to deploy the new image.
       - name: Update Kubernetes deployment manifest with new image tag
         run: |
           sed -i "s|image: .*|image: $IMAGE_NAME:$IMAGE_TAG|g" $DEPLOYMENT_FILE
 
-      # ------------------------------------------------------------
-      # STEP 10 - Display updated deployment file for debugging
-      # ------------------------------------------------------------
-      # Helpful to verify that the image tag was updated correctly.
+      # ============================================================
+      # STEP 11 - Display updated deployment file in workflow logs
+      # ============================================================
+      # Helpful for debugging to verify the image line was updated correctly.
       - name: Display updated deployment file
         run: |
-          echo "Updated deployment file content:"
+          echo "Updated deployment.yaml content:"
           cat $DEPLOYMENT_FILE
 
-      # ------------------------------------------------------------
-      # STEP 11 - Commit and push updated deployment manifest back to GitHub
-      # ------------------------------------------------------------
+      # ============================================================
+      # STEP 12 - Commit and push updated deployment.yaml back to GitHub
+      # ============================================================
       # This is the GitOps trigger point.
-      # Once deployment.yaml is committed with the new image tag,
-      # Argo CD detects the repo change and syncs it to Kubernetes.
+      # Once deployment.yaml is updated in Git, Argo CD sees the change and syncs it.
       #
-      # [skip ci] is added in commit message so this CI-generated commit
-      # does not trigger an unnecessary pipeline loop.
+      # We use [skip ci] so that this auto-generated commit does not start the workflow again.
       - name: Commit and push updated deployment manifest
         run: |
-          # Configure Git identity for the automated commit
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          # Stage only the deployment file we modified
           git add $DEPLOYMENT_FILE
 
-          # If there is no actual file change, skip commit/push
           if git diff --cached --quiet; then
             echo "No manifest changes detected. Nothing to commit."
           else
-            # Commit updated image tag into deployment.yaml
             git commit -m "Update deployment image to $IMAGE_TAG [skip ci]"
 
-            # Pull latest remote changes before pushing.
-            # This avoids non-fast-forward push errors if main moved ahead.
+            # Pull latest remote changes before pushing, to avoid non-fast-forward errors
             git pull --rebase origin main
 
-            # Push updated deployment manifest back to the same branch
+            # Push updated deployment manifest back to GitHub
             git push origin main
           fi
+
+      # ============================================================
+      # STEP 13 - Clean up old Docker Hub image tags
+      # ============================================================
+      # Why do we need this?
+      # Every CI run creates a new SHA-based tag like:
+      # - 7c9613a
+      # - 6d61baf
+      # - 5ab1234
+      #
+      # If we keep all tags forever, Docker Hub becomes cluttered.
+      #
+      # Retention policy implemented here:
+      # KEEP:
+      # - latest
+      # - current IMAGE_TAG
+      # - last N recent SHA tags (N = TAGS_TO_KEEP)
+      #
+      # DELETE:
+      # - older SHA tags beyond the keep count
+      #
+      # Notes:
+      # - This cleanup runs only AFTER build/scan/push/manifest-update succeeded.
+      # - We are cleaning Docker Hub tags, NOT GitHub runner local images.
+      - name: Cleanup old Docker Hub tags
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -e
+
+          echo "Starting Docker Hub tag cleanup..."
+          echo "Repository: $DOCKERHUB_USERNAME/$DOCKERHUB_REPO"
+          echo "Current image tag to preserve: $IMAGE_TAG"
+          echo "Number of recent SHA tags to keep: $TAGS_TO_KEEP"
+
+          # --------------------------------------------------------
+          # 1. Get Docker Hub JWT token using username + token/password
+          # --------------------------------------------------------
+          TOKEN=$(curl -s -X POST https://hub.docker.com/v2/users/login/ \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"$DOCKERHUB_USERNAME\",\"password\":\"$DOCKERHUB_TOKEN\"}" | jq -r .token)
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Failed to get Docker Hub API token."
+            exit 1
+          fi
+
+          echo "Docker Hub token retrieved successfully."
+
+          # --------------------------------------------------------
+          # 2. Fetch all tags from Docker Hub repo
+          # --------------------------------------------------------
+          # We request a larger page size to cover more tags.
+          TAGS_JSON=$(curl -s -H "Authorization: JWT $TOKEN" \
+            "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO/tags?page_size=100")
+
+          echo "Fetched Docker Hub tags."
+
+          # --------------------------------------------------------
+          # 3. Extract tag names sorted by last_updated (newest first)
+          # --------------------------------------------------------
+          # We are interested mainly in SHA-based tags.
+          # We will skip:
+          # - latest
+          # - current IMAGE_TAG
+          #
+          # Then from remaining SHA tags, keep the newest TAGS_TO_KEEP tags.
+          #
+          # jq explanation:
+          # .results[]        -> iterate over tag objects
+          # .name             -> get tag name
+          SHA_TAGS=$(echo "$TAGS_JSON" | jq -r '.results[].name')
+
+          echo "All tags in Docker Hub repo:"
+          echo "$SHA_TAGS"
+
+          # --------------------------------------------------------
+          # 4. Build a list of tags that are candidates for deletion
+          # --------------------------------------------------------
+          # Exclude:
+          # - latest
+          # - current IMAGE_TAG
+          #
+          # Keep only tags that look like short SHA tags:
+          # regex: 7 lowercase hex chars
+          #
+          # Example matches:
+          # 7c9613a
+          # 6d61baf
+          CANDIDATE_TAGS=$(echo "$SHA_TAGS" | grep -E '^[a-f0-9]{7}$' | grep -v "^$IMAGE_TAG$" || true)
+
+          echo "Candidate SHA tags excluding current tag:"
+          echo "$CANDIDATE_TAGS"
+
+          # --------------------------------------------------------
+          # 5. Keep only the most recent N SHA tags, delete the rest
+          # --------------------------------------------------------
+          # Since Docker Hub API already returns tags in reverse chronological order
+          # (newest first), we keep the first N and delete the rest.
+          #
+          # tail -n +X means "print from line X onward"
+          DELETE_TAGS=$(echo "$CANDIDATE_TAGS" | tail -n +$((TAGS_TO_KEEP + 1)) || true)
+
+          if [ -z "$DELETE_TAGS" ]; then
+            echo "No old SHA tags to delete. Cleanup not required."
+            exit 0
+          fi
+
+          echo "Tags selected for deletion:"
+          echo "$DELETE_TAGS"
+
+          # --------------------------------------------------------
+          # 6. Delete old tags one by one from Docker Hub
+          # --------------------------------------------------------
+          while read -r TAG; do
+            if [ -n "$TAG" ]; then
+              echo "Deleting old Docker Hub tag: $TAG"
+
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X DELETE \
+                -H "Authorization: JWT $TOKEN" \
+                "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO/tags/$TAG/")
+
+              if [ "$HTTP_CODE" = "204" ]; then
+                echo "Successfully deleted tag: $TAG"
+              else
+                echo "Failed to delete tag: $TAG (HTTP $HTTP_CODE)"
+              fi
+            fi
+          done <<< "$DELETE_TAGS"
+
+          echo "Docker Hub cleanup step completed."
