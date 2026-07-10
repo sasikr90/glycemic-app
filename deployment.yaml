@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: glycemic-app                 # Container name inside the Pod
-          image: sasikr90/glycemic-app:d788611
+          image: sasikr90/glycemic-app:d86a639
           # IMPORTANT:
           # GitHub Actions will replace this tag with the commit SHA tag.
           # Example: sasikr90/glycemic-app:3c2d9a8f...
